@@ -1,34 +1,41 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="900px" height="600px" viewBox="0 0 900 600">
-  <!-- Background -->
-  <rect width="100%" height="100%" fill="#ffffff"/>
+<svg width="960" height="540" viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg" version="1.1">
+  <style>
+    .outline { stroke: #000000; stroke-width: 2; fill: none; }
+    .label { font: bold 14px sans-serif; fill: #000000; }
+    .sub { font: 12px sans-serif; fill: #333333; }
+    .dashed { stroke: #888; stroke-dasharray: 6,4; fill: none; }
+  </style>
 
-  <!-- Frame Body -->
-  <rect x="250" y="200" width="400" height="180" rx="20" ry="20" fill="#d0d0d0" stroke="#000000" stroke-width="2"/>
-
-  <!-- Nose cone -->
-  <polygon points="250,200 180,290 250,380" fill="#c0c0c0" stroke="#000000" stroke-width="2"/>
-
-  <!-- Tail taper -->
-  <polygon points="650,200 720,290 650,380" fill="#c0c0c0" stroke="#000000" stroke-width="2"/>
+  <!-- Body -->
+  <rect x="300" y="200" width="360" height="140" rx="20" class="outline"/>
+  <text x="480" y="270" text-anchor="middle" class="label">Main Body (Carbon Fiber)</text>
 
   <!-- Wings -->
-  <polygon points="280,190 230,120 280,130 330,190" fill="#e0e0e0" stroke="#000000" stroke-width="1.5"/>
-  <polygon points="620,190 670,120 620,130 570,190" fill="#e0e0e0" stroke="#000000" stroke-width="1.5"/>
-  <polygon points="280,390 230,460 280,450 330,390" fill="#e0e0e0" stroke="#000000" stroke-width="1.5"/>
-  <polygon points="620,390 670,460 620,450 570,390" fill="#e0e0e0" stroke="#000000" stroke-width="1.5"/>
+  <polygon points="300,200 180,150 180,170 300,240" class="outline"/>
+  <polygon points="660,200 780,150 780,170 660,240" class="outline"/>
+  <text x="180" y="145" class="sub">Left Wing</text>
+  <text x="780" y="145" text-anchor="end" class="sub">Right Wing</text>
 
-  <!-- Dimension text (no arrows, simple labels) -->
-  <text x="400" y="440" font-size="16" text-anchor="middle" fill="#000000">Length: 6.5 ft / 198 cm</text>
-  <text x="120" y="300" font-size="16" text-anchor="middle" fill="#000000" transform="rotate(-90,120,300)">Wingspan: 4.2 ft / 128 cm</text>
+  <!-- Plasma Chamber -->
+  <circle cx="480" cy="270" r="40" class="dashed"/>
+  <text x="480" y="270" text-anchor="middle" class="sub" dy="5">Plasma Core</text>
 
-  <!-- Center marker -->
-  <circle cx="450" cy="290" r="4" fill="red"/>
-  <text x="460" y="285" font-size="12" fill="black">Center of Mass</text>
+  <!-- Intake Coils -->
+  <circle cx="400" cy="270" r="12" class="outline"/>
+  <circle cx="560" cy="270" r="12" class="outline"/>
+  <text x="400" y="290" text-anchor="middle" class="sub">IC</text>
+  <text x="560" y="290" text-anchor="middle" class="sub">IC</text>
 
-  <!-- Labels -->
-  <text x="300" y="215" font-size="12" fill="#000000">Avionics Bay</text>
-  <text x="320" y="330" font-size="12" fill="#000000">Power & Capacitor Storage</text>
-  <text x="180" y="290" font-size="12" fill="#000000" transform="rotate(-90,180,290)">Nose Cone (Sensor Array)</text>
-  <text x="690" y="290" font-size="12" fill="#000000" transform="rotate(90,690,290)">EM Pulse Exhaust Tunnel</text>
+  <!-- Rear Control Fins -->
+  <polygon points="300,340 270,370 270,350 300,320" class="outline"/>
+  <polygon points="660,340 690,370 690,350 660,320" class="outline"/>
+  <text x="270" y="375" class="sub">Fin L</text>
+  <text x="690" y="375" class="sub">Fin R</text>
+
+  <!-- Measurements -->
+  <line x1="300" y1="360" x2="660" y2="360" class="dashed"/>
+  <text x="480" y="375" text-anchor="middle" class="sub">Length ~2m</text>
+  <line x1="480" y1="200" x2="480" y2="340" class="dashed"/>
+  <text x="490" y="270" class="sub">Height ~33cm</text>
 </svg>

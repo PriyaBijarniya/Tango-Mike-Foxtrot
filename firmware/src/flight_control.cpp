@@ -1,110 +1,121 @@
 /*
- * flight_control.cpp - TMF drone flight control implementation
+ * flight_control.cpp - Flight control stabilization and motor mixing for TMF drone
  * MCU: STM32F746ZG
  * Author: BryceWDesign
  * License: Apache-2.0
  *
- * Implements PID controllers for roll, pitch, yaw stabilization
- * Integrates with IMU sensor fusion (e.g., MPU9250) for attitude estimation
- * Controls thrust vectoring via plasma coils and traditional ESC motors
- * Supports target angle and altitude hold with RTOS task scheduling
+ * Implements PID control loops for roll, pitch, yaw stabilization,
+ * motor output mixing, and emergency shutdown.
  */
 
 #include "flight_control.h"
+#include <string.h>
 #include <math.h>
-#include <stdbool.h>
-#include "imu_sensor.h"
-#include "coil_control.h"
-#include "motor_control.h"
 
-// PID parameters (tune these for best flight performance)
-typedef struct {
-    float kp;
-    float ki;
-    float kd;
-    float integral;
-    float last_error;
-} PIDController;
+// PID controllers for roll, pitch, yaw
+static PID_Controller_t pid_roll;
+static PID_Controller_t pid_pitch;
+static PID_Controller_t pid_yaw;
 
-// PID Controllers for roll, pitch, yaw, altitude
-static PIDController pid_roll = {4.0f, 0.01f, 0.1f, 0.0f, 0.0f};
-static PIDController pid_pitch = {4.0f, 0.01f, 0.1f, 0.0f, 0.0f};
-static PIDController pid_yaw = {3.0f, 0.005f, 0.05f, 0.0f, 0.0f};
-static PIDController pid_altitude = {6.0f, 0.02f, 0.3f, 0.0f, 0.0f};
+// Current attitude setpoint
+static AttitudeSetpoint_t attitude_setpoint;
 
-// Target setpoints
-static float target_roll_deg = 0.0f;
-static float target_pitch_deg = 0.0f;
-static float target_yaw_deg = 0.0f;
-static float target_altitude_m = 0.0f;
+// Latest motor outputs
+static uint16_t motor_outputs[MOTOR_COUNT];
 
-// Sampling time (seconds)
-#define CONTROL_LOOP_DT 0.01f  // 100Hz control loop
+// Helper PID function prototypes
+static float PID_Update(PID_Controller_t *pid, float setpoint, float measured, float dt);
+static void MotorMix(float roll_output, float pitch_output, float yaw_output, uint16_t *motors);
 
-// Helper PID function
-static float PID_Update(PIDController *pid, float setpoint, float measured) {
-    float error = setpoint - measured;
-    pid->integral += error * CONTROL_LOOP_DT;
-    float derivative = (error - pid->last_error) / CONTROL_LOOP_DT;
-    pid->last_error = error;
-    return (pid->kp * error) + (pid->ki * pid->integral) + (pid->kd * derivative);
+bool FlightControl_Init(void) {
+    // Initialize PID controllers with tuned constants (example values)
+    pid_roll.kp = 6.0f; pid_roll.ki = 0.05f; pid_roll.kd = 0.3f;
+    pid_pitch.kp = 6.0f; pid_pitch.ki = 0.05f; pid_pitch.kd = 0.3f;
+    pid_yaw.kp = 4.0f; pid_yaw.ki = 0.02f; pid_yaw.kd = 0.15f;
+
+    pid_roll.integrator = 0.0f; pid_pitch.integrator = 0.0f; pid_yaw.integrator = 0.0f;
+    pid_roll.prev_error = 0.0f; pid_pitch.prev_error = 0.0f; pid_yaw.prev_error = 0.0f;
+
+    pid_roll.output_min = -400.0f; pid_roll.output_max = 400.0f;
+    pid_pitch.output_min = -400.0f; pid_pitch.output_max = 400.0f;
+    pid_yaw.output_min = -400.0f; pid_yaw.output_max = 400.0f;
+
+    memset(motor_outputs, MOTOR_PWM_MIN, sizeof(motor_outputs));
+
+    attitude_setpoint.roll = 0.0f;
+    attitude_setpoint.pitch = 0.0f;
+    attitude_setpoint.yaw = 0.0f;
+
+    return true;
 }
 
-// Initialize flight control system
-void FlightControl_Init(void) {
-    // Reset PID integrals and errors
-    pid_roll.integral = 0.0f; pid_roll.last_error = 0.0f;
-    pid_pitch.integral = 0.0f; pid_pitch.last_error = 0.0f;
-    pid_yaw.integral = 0.0f; pid_yaw.last_error = 0.0f;
-    pid_altitude.integral = 0.0f; pid_altitude.last_error = 0.0f;
-
-    // Initialize sensors and motor interfaces
-    IMU_Init();
-    MotorControl_Init();
-    CoilControl_Init();
+void FlightControl_SetAttitudeSetpoint(AttitudeSetpoint_t setpoint) {
+    attitude_setpoint = setpoint;
 }
 
-void FlightControl_SetTargetAngles(float roll_deg, float pitch_deg, float yaw_deg) {
-    target_roll_deg = roll_deg;
-    target_pitch_deg = pitch_deg;
-    target_yaw_deg = yaw_deg;
+void FlightControl_Update(IMU_State_t *imu_state) {
+    // Assuming fixed dt for simplicity (e.g. 0.01s update rate)
+    float dt = 0.01f;
+
+    // Calculate PID outputs for each axis
+    float roll_output = PID_Update(&pid_roll, attitude_setpoint.roll, imu_state->roll, dt);
+    float pitch_output = PID_Update(&pid_pitch, attitude_setpoint.pitch, imu_state->pitch, dt);
+    float yaw_output = PID_Update(&pid_yaw, attitude_setpoint.yaw, imu_state->yaw, dt);
+
+    // Mix PID outputs to motor signals
+    MotorMix(roll_output, pitch_output, yaw_output, motor_outputs);
 }
 
-void FlightControl_SetTargetAltitude(float altitude_m) {
-    target_altitude_m = altitude_m;
+void FlightControl_GetMotorOutputs(uint16_t motor_out[MOTOR_COUNT]) {
+    memcpy(motor_out, motor_outputs, sizeof(motor_outputs));
 }
 
-// Main flight control loop; called periodically by RTOS task (100Hz)
-void FlightControl_Loop(void *parameters) {
-    while (1) {
-        // Read current attitude from IMU sensor fusion
-        float current_roll, current_pitch, current_yaw;
-        IMU_GetEulerAngles(&current_roll, &current_pitch, &current_yaw);
-
-        // Read current altitude from barometer/altimeter (stub)
-        float current_altitude = 0.0f; // TODO: integrate actual sensor
-
-        // Compute PID corrections
-        float roll_cmd = PID_Update(&pid_roll, target_roll_deg, current_roll);
-        float pitch_cmd = PID_Update(&pid_pitch, target_pitch_deg, current_pitch);
-        float yaw_cmd = PID_Update(&pid_yaw, target_yaw_deg, current_yaw);
-        float altitude_cmd = PID_Update(&pid_altitude, target_altitude_m, current_altitude);
-
-        // Map PID outputs to coil currents and motor throttle
-        // Here, coil currents are used for fine attitude adjustments,
-        // motors provide gross thrust and yaw control
-
-        // Example: Set coil currents proportional to roll/pitch commands
-        CoilControl_SetCoilCurrent(0, 1000.0f + roll_cmd * 10.0f - pitch_cmd * 10.0f); // Coil 0
-        CoilControl_SetCoilCurrent(1, 1000.0f - roll_cmd * 10.0f - pitch_cmd * 10.0f); // Coil 1
-        CoilControl_SetCoilCurrent(2, 1000.0f + roll_cmd * 10.0f + pitch_cmd * 10.0f); // Coil 2
-        CoilControl_SetCoilCurrent(3, 1000.0f - roll_cmd * 10.0f + pitch_cmd * 10.0f); // Coil 3
-
-        // Motor control: use altitude_cmd and yaw_cmd to set throttle and yaw motors
-        MotorControl_SetThrottle(altitude_cmd);
-        MotorControl_SetYaw(yaw_cmd);
-
-        // Delay to maintain loop timing (RTOS delay or hardware timer)
-        vTaskDelay(pdMS_TO_TICKS(10)); // 10 ms delay for 100Hz loop
+void FlightControl_MotorStop(void) {
+    for (int i = 0; i < MOTOR_COUNT; i++) {
+        motor_outputs[i] = MOTOR_PWM_MIN;
     }
+}
+
+// --- PID helper function ---
+static float PID_Update(PID_Controller_t *pid, float setpoint, float measured, float dt) {
+    float error = setpoint - measured;
+    pid->integrator += error * dt;
+
+    // Anti-windup
+    if (pid->integrator > pid->output_max) pid->integrator = pid->output_max;
+    else if (pid->integrator < pid->output_min) pid->integrator = pid->output_min;
+
+    float derivative = (error - pid->prev_error) / dt;
+    pid->prev_error = error;
+
+    float output = pid->kp * error + pid->ki * pid->integrator + pid->kd * derivative;
+
+    if (output > pid->output_max) output = pid->output_max;
+    else if (output < pid->output_min) output = pid->output_min;
+
+    return output;
+}
+
+// --- Motor mixing for quad X-configuration ---
+// Motors order: 0=front-left, 1=front-right, 2=rear-right, 3=rear-left
+static void MotorMix(float roll_output, float pitch_output, float yaw_output, uint16_t *motors) {
+    // Base throttle at midpoint (1500), PID outputs add/subtract to each motor
+    float base_throttle = 1500.0f;
+
+    // Mixing matrix (typical quad X)
+    // Motor 0: +roll, +pitch, -yaw
+    // Motor 1: -roll, +pitch, +yaw
+    // Motor 2: -roll, -pitch, -yaw
+    // Motor 3: +roll, -pitch, +yaw
+
+    float m0 = base_throttle + roll_output + pitch_output - yaw_output;
+    float m1 = base_throttle - roll_output + pitch_output + yaw_output;
+    float m2 = base_throttle - roll_output - pitch_output - yaw_output;
+    float m3 = base_throttle + roll_output - pitch_output + yaw_output;
+
+    // Clamp outputs
+    motors[0] = (uint16_t)(m0 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m0 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m0));
+    motors[1] = (uint16_t)(m1 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m1 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m1));
+    motors[2] = (uint16_t)(m2 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m2 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m2));
+    motors[3] = (uint16_t)(m3 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m3 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m3));
 }

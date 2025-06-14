@@ -1,179 +1,155 @@
 /*
- * sensors.cpp - Sensor drivers and state estimation for TMF drone
+ * sensors.cpp - Sensor driver implementation for TMF drone
  * MCU: STM32F746ZG
  * Author: BryceWDesign
- * License: APACHE 2.0
+ * License: Apache-2.0
  *
- * Implements:
- * - BMI270 IMU initialization and data reading
- * - BMP388 Barometric pressure sensor handling
- * - MAX31855 thermocouple interface for coil temp
- * - Extended Kalman Filter (EKF) for state estimation
+ * Handles initialization and data acquisition from onboard sensors:
+ * - IMU (MPU9250 or equivalent)
+ * - Barometer (BMP280 or equivalent)
+ * - Plasma ionization sensor (custom analog input)
  */
 
 #include "sensors.h"
 #include "stm32f7xx_hal.h"
-#include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
-// Hardware SPI/I2C handles externally defined
-extern SPI_HandleTypeDef hspi1;
-extern I2C_HandleTypeDef hi2c1;
+// Peripheral handles (extern or static based on your MCU setup)
+extern I2C_HandleTypeDef hi2c1;   // For IMU and Barometer
+extern ADC_HandleTypeDef hadc1;   // For plasma sensor analog input
 
-// Raw sensor data buffers
-static int16_t accelRaw[3];
-static int16_t gyroRaw[3];
-static int16_t magRaw[3];
-static float baroPressure;
-static float baroTemp;
-static float coilTemp;
+// IMU sensor I2C address (MPU9250 example)
+#define IMU_I2C_ADDR 0x68 << 1
 
-// Filter states
-typedef struct {
-    float q[4];     // Quaternion (w,x,y,z)
-    float pos[3];   // Position x,y,z meters
-    float vel[3];   // Velocity m/s
-} EKF_State;
+// Barometer I2C address (BMP280 example)
+#define BARO_I2C_ADDR 0x76 << 1
 
-static EKF_State ekfState;
+// Plasma sensor ADC channel (example)
+#define PLASMA_ADC_CHANNEL ADC_CHANNEL_5
 
-// Timing
-static uint32_t lastSensorReadTime = 0;
-static const uint32_t sensorReadIntervalMs = 1; // 1 kHz
+// Internal functions for low-level sensor interaction
+static bool IMU_Init(void);
+static bool Barometer_Init(void);
+static bool ReadIMURaw(uint8_t *buffer, size_t length);
+static bool ReadBarometerRaw(uint8_t *buffer, size_t length);
+static bool ReadPlasmaRaw(uint16_t *adc_value);
 
-// Forward declarations
-static void BMI270_Init(void);
-static void BMP388_Init(void);
-static void MAX31855_Init(void);
-static void ReadBMI270(void);
-static void ReadBMP388(void);
-static void ReadMAX31855(void);
-static void EKF_Update(float dt);
-
-void Sensors_Init(void)
-{
-    BMI270_Init();
-    BMP388_Init();
-    MAX31855_Init();
-
-    // Initialize EKF state
-    ekfState.q[0] = 1.0f; ekfState.q[1] = 0.0f; ekfState.q[2] = 0.0f; ekfState.q[3] = 0.0f;
-    memset(ekfState.pos, 0, sizeof(ekfState.pos));
-    memset(ekfState.vel, 0, sizeof(ekfState.vel));
-
-    lastSensorReadTime = HAL_GetTick();
+bool Sensors_Init(void) {
+    bool imu_ok = IMU_Init();
+    bool baro_ok = Barometer_Init();
+    // ADC assumed initialized in main setup
+    return imu_ok && baro_ok;
 }
 
-void SensorTask(void *parameters)
-{
-    (void)parameters;
-    uint32_t currentTime, dtMs;
-    float dtSec;
+bool Sensors_ReadIMU(IMU_Data_t *data) {
+    uint8_t raw[14];
+    if (!ReadIMURaw(raw, sizeof(raw))) return false;
 
-    while (1)
-    {
-        currentTime = HAL_GetTick();
-        dtMs = currentTime - lastSensorReadTime;
-        if (dtMs >= sensorReadIntervalMs)
-        {
-            // Read raw sensor data
-            ReadBMI270();
-            ReadBMP388();
-            ReadMAX31855();
+    // Convert raw data to physical units (assuming MPU9250 registers)
+    int16_t ax = (raw[0] << 8) | raw[1];
+    int16_t ay = (raw[2] << 8) | raw[3];
+    int16_t az = (raw[4] << 8) | raw[5];
+    int16_t gx = (raw[8] << 8) | raw[9];
+    int16_t gy = (raw[10] << 8) | raw[11];
+    int16_t gz = (raw[12] << 8) | raw[13];
 
-            dtSec = dtMs / 1000.0f;
-            EKF_Update(dtSec);
+    // MPU9250 scales: accel 16g range = 2048 LSB/g, gyro 2000 dps = 16.4 LSB/°/s
+    data->accel_x = ((float)ax) / 2048.0f;
+    data->accel_y = ((float)ay) / 2048.0f;
+    data->accel_z = ((float)az) / 2048.0f;
+    data->gyro_x = ((float)gx) / 16.4f;
+    data->gyro_y = ((float)gy) / 16.4f;
+    data->gyro_z = ((float)gz) / 16.4f;
 
-            lastSensorReadTime = currentTime;
-        }
-        vTaskDelay(1);
+    // Magnetometer omitted for brevity, but can be added similarly
+
+    data->mag_x = 0.0f;
+    data->mag_y = 0.0f;
+    data->mag_z = 0.0f;
+
+    return true;
+}
+
+bool Sensors_ReadBarometer(Barometer_Data_t *data) {
+    uint8_t raw[6];
+    if (!ReadBarometerRaw(raw, sizeof(raw))) return false;
+
+    // Simple BMP280 pressure and temperature conversion (approximate)
+    uint32_t pres_raw = (raw[0] << 12) | (raw[1] << 4) | (raw[2] >> 4);
+    uint32_t temp_raw = (raw[3] << 12) | (raw[4] << 4) | (raw[5] >> 4);
+
+    // Apply calibration here (omitted for brevity, use library or datasheet)
+    // Placeholder conversions:
+    data->pressure = (float)pres_raw / 256.0f;
+    data->temperature = (float)temp_raw / 512.0f;
+
+    // Calculate altitude from pressure (standard atmosphere)
+    data->altitude = 44330.0f * (1.0f - powf(data->pressure / 1013.25f, 0.1903f));
+
+    return true;
+}
+
+bool Sensors_ReadPlasmaSensor(PlasmaSensor_Data_t *data) {
+    uint16_t adc_value = 0;
+    if (!ReadPlasmaRaw(&adc_value)) return false;
+
+    // Convert ADC value to temperature and ionization levels (calibration needed)
+    data->temperature = ((float)adc_value / 4095.0f) * 100.0f; // dummy scale
+    data->ionization = (float)adc_value;
+
+    return true;
+}
+
+// Internal implementations
+static bool IMU_Init(void) {
+    // Example: write to IMU registers to wake up device and configure
+    uint8_t data[2];
+    data[0] = 0x6B; // PWR_MGMT_1 register
+    data[1] = 0x00; // Clear sleep bit
+    if (HAL_I2C_Master_Transmit(&hi2c1, IMU_I2C_ADDR, data, 2, 100) != HAL_OK) return false;
+
+    // Additional configuration omitted for brevity
+
+    return true;
+}
+
+static bool Barometer_Init(void) {
+    // Example: write config to barometer registers
+    uint8_t data[2];
+    data[0] = 0xF4; // CTRL_MEAS register
+    data[1] = 0x27; // Temp and pressure oversampling x1, normal mode
+    if (HAL_I2C_Master_Transmit(&hi2c1, BARO_I2C_ADDR, data, 2, 100) != HAL_OK) return false;
+
+    return true;
+}
+
+static bool ReadIMURaw(uint8_t *buffer, size_t length) {
+    if (HAL_I2C_Mem_Read(&hi2c1, IMU_I2C_ADDR, 0x3B, I2C_MEMADD_SIZE_8BIT, buffer, length, 100) != HAL_OK) {
+        return false;
     }
+    return true;
 }
 
-/* BMI270 IMU Functions */
-
-static void BMI270_Init(void)
-{
-    // Reset device, configure accelerometer, gyroscope, magnetometer, set output data rates
-    // Use SPI for communication
-    // Enable interrupts for data ready if available
-    // Detailed register setup omitted for brevity, but includes:
-    // - Accel ODR 1kHz, range ±16g
-    // - Gyro ODR 1kHz, range ±2000 dps
-    // - Magnetometer enabled
+static bool ReadBarometerRaw(uint8_t *buffer, size_t length) {
+    if (HAL_I2C_Mem_Read(&hi2c1, BARO_I2C_ADDR, 0xF7, I2C_MEMADD_SIZE_8BIT, buffer, length, 100) != HAL_OK) {
+        return false;
+    }
+    return true;
 }
 
-static void ReadBMI270(void)
-{
-    // SPI transactions to read accel, gyro, mag registers into accelRaw, gyroRaw, magRaw
-    // Convert to physical units (m/s^2, rad/s, uT)
-    // Apply calibration offsets and scale factors
+static bool ReadPlasmaRaw(uint16_t *adc_value) {
+    ADC_ChannelConfTypeDef sConfig = {0};
+    sConfig.Channel = PLASMA_ADC_CHANNEL;
+    sConfig.Rank = 1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) return false;
+
+    if (HAL_ADC_Start(&hadc1) != HAL_OK) return false;
+    if (HAL_ADC_PollForConversion(&hadc1, 10) != HAL_OK) return false;
+
+    *adc_value = HAL_ADC_GetValue(&hadc1);
+
+    HAL_ADC_Stop(&hadc1);
+    return true;
 }
-
-/* BMP388 Barometric Pressure Sensor */
-
-static void BMP388_Init(void)
-{
-    // I2C commands to initialize BMP388 with high precision mode
-}
-
-static void ReadBMP388(void)
-{
-    // Read raw pressure and temperature data
-    // Apply compensation formula per datasheet to calculate real pressure (Pa) and temperature (°C)
-    // Store in baroPressure and baroTemp
-}
-
-/* MAX31855 Thermocouple Reader */
-
-static void MAX31855_Init(void)
-{
-    // SPI init for thermocouple amplifier
-}
-
-static void ReadMAX31855(void)
-{
-    // Read raw SPI data from MAX31855
-    // Convert to Celsius degrees and store in coilTemp
-}
-
-/* EKF State Estimation */
-
-static void EKF_Update(float dt)
-{
-    // Use gyro and accel data to update quaternion orientation
-    // Use barometric altitude to correct vertical position estimate
-    // Integrate velocity and position using accel data compensated for gravity and orientation
-    // Fuse magnetometer data for yaw correction
-
-    // Quaternion integration example:
-    // q_dot = 0.5 * Omega * q
-    // where Omega derived from gyro readings
-
-    // Kalman gain and covariance matrices maintained internally
-    // Full EKF math omitted here due to complexity
-}
-
-float* GetOrientationQuaternion(void)
-{
-    return ekfState.q;
-}
-
-float* GetPosition(void)
-{
-    return ekfState.pos;
-}
-
-float GetCoilTemperature(void)
-{
-    return coilTemp;
-}
-
-float GetBarometricAltitude(void)
-{
-    // Calculate altitude from pressure using standard atmosphere model
-    // Approximation:
-    const float seaLevelPressure = 101325.0f; // Pa
-    return 44330.0f * (1.0f - powf(baroPressure / seaLevelPressure, 0.1903f));
-}
-

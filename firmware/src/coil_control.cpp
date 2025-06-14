@@ -1,133 +1,96 @@
 /*
- * coil_control.cpp - Plasma coil driver implementation for TMF drone
+ * coil_control.cpp - Plasma coil control implementation for TMF drone
  * MCU: STM32F746ZG
  * Author: BryceWDesign
  * License: Apache-2.0
  *
- * Controls four plasma coils via PWM and DAC
- * Measures coil current via ADC feedback for closed-loop control
- * Implements safety cutoffs and coil temperature monitoring (stub)
+ * Controls high-frequency PWM or DAC output for plasma coil thruster drive.
+ * Uses hardware timers and DAC channels configured for high-frequency signals.
  */
 
 #include "coil_control.h"
-#include <stdint.h>
-#include <stdbool.h>
 #include "stm32f7xx_hal.h"
+#include <math.h>
 
-// Hardware definitions (replace with actual pins/timers as needed)
-#define COIL_PWM_TIMER        htim1
-#define COIL_PWM_CHANNEL_1    TIM_CHANNEL_1
-#define COIL_PWM_CHANNEL_2    TIM_CHANNEL_2
-#define COIL_PWM_CHANNEL_3    TIM_CHANNEL_3
-#define COIL_PWM_CHANNEL_4    TIM_CHANNEL_4
+// Example hardware definitions (adjust to actual MCU pins and peripherals)
+#define COIL_PWM_TIMER          htim2
+#define COIL_PWM_CHANNEL        TIM_CHANNEL_1
 
-#define CURRENT_SENSOR_ADC    hadc1
-#define TEMPERATURE_SENSOR_ADC hadc2
+extern TIM_HandleTypeDef COIL_PWM_TIMER;
 
-// Constants
-#define MAX_COIL_CURRENT_mA   1500.0f   // Max safe coil current in milliamps
-#define PWM_MAX_DUTY_CYCLE    1000      // Max timer value for 100% duty cycle
+// For amplitude control, using DAC channel (if available)
+#define COIL_DAC_CHANNEL        DAC_CHANNEL_1
+extern DAC_HandleTypeDef hdac;
 
-// Static state
-static float coil_current_setpoints[4] = {0};
-static float coil_current_measured[4] = {0};
-static float coil_voltage_measured[4] = {0};
+// Internal state tracking
+static uint32_t current_frequency = 0;
+static float current_amplitude = 0.0f;
+static bool coil_active = false;
 
-// Forward declarations
-static void SetPWM(uint8_t coilIndex, uint16_t duty);
-static uint16_t CurrentToPWMDuty(float current_mA);
-
-// Public API
+// Helper: Calculate timer period for given frequency
+static uint32_t FrequencyToTimerPeriod(uint32_t frequency) {
+    // Assuming timer clock 100MHz (adjust as per clock config)
+    // Timer period = TimerClock / frequency - 1
+    if (frequency == 0) return 0xFFFFFFFF;
+    return (100000000 / frequency) - 1;
+}
 
 void CoilControl_Init(void) {
-    // Initialize PWM timers and ADCs - assumed to be done externally
-    // Just set all coil outputs to 0 duty cycle here
-    SetPWM(0, 0);
-    SetPWM(1, 0);
-    SetPWM(2, 0);
-    SetPWM(3, 0);
+    // Initialize PWM timer and DAC for coil control
+    HAL_TIM_PWM_Start(&COIL_PWM_TIMER, COIL_PWM_CHANNEL);
+    HAL_DAC_Start(&hdac, COIL_DAC_CHANNEL);
+    coil_active = false;
 }
 
-void CoilControlTask(void *parameters) {
-    // Called periodically (e.g., 1kHz) by RTOS task or main loop
-
-    for (uint8_t i = 0; i < 4; i++) {
-        // Read ADC for current sensor of coil i
-        // Stub: simulate reading for now
-        uint16_t adc_value = HAL_ADC_GetValue(&CURRENT_SENSOR_ADC);
-        coil_current_measured[i] = ((float)adc_value) * 3.3f / 4095.0f * 1000.0f; // milliamps approximation
-        
-        // Convert current setpoint to PWM duty
-        uint16_t pwm_duty = CurrentToPWMDuty(coil_current_setpoints[i]);
-
-        // Safety clamp
-        if (coil_current_setpoints[i] > MAX_COIL_CURRENT_mA) {
-            coil_current_setpoints[i] = MAX_COIL_CURRENT_mA;
-        }
-        if (coil_current_setpoints[i] < 0) {
-            coil_current_setpoints[i] = 0;
-        }
-
-        // Set PWM duty for coil
-        SetPWM(i, pwm_duty);
+bool CoilControl_SetFrequency(uint32_t frequency_hz) {
+    if (frequency_hz < 10000 || frequency_hz > 1000000) {
+        // Out of range
+        return false;
     }
 
-    // TODO: Add temperature monitoring and safety cutoffs
+    uint32_t period = FrequencyToTimerPeriod(frequency_hz);
+    if (period == 0xFFFFFFFF) return false;
+
+    // Update timer period register to adjust PWM frequency
+    COIL_PWM_TIMER.Instance->ARR = period;
+
+    // Reset timer counter to avoid glitches
+    COIL_PWM_TIMER.Instance->CNT = 0;
+
+    current_frequency = frequency_hz;
+    return true;
 }
 
-void SetCoilCurrentSetpoint(float milliamps) {
-    for (uint8_t i = 0; i < 4; i++) {
-        coil_current_setpoints[i] = milliamps;
-    }
+void CoilControl_SetAmplitude(float amplitude) {
+    // Clamp amplitude between 0 and 1
+    if (amplitude < 0.0f) amplitude = 0.0f;
+    if (amplitude > 1.0f) amplitude = 1.0f;
+
+    current_amplitude = amplitude;
+
+    // Convert amplitude to DAC output value (12-bit resolution assumed)
+    uint32_t dac_value = (uint32_t)(amplitude * 4095);
+
+    // Set DAC output to modulate coil power
+    HAL_DAC_SetValue(&hdac, COIL_DAC_CHANNEL, DAC_ALIGN_12B_R, dac_value);
+
+    // Adjust PWM duty cycle proportional to amplitude
+    uint32_t pulse = (uint32_t)(COIL_PWM_TIMER.Instance->ARR * amplitude);
+    __HAL_TIM_SET_COMPARE(&COIL_PWM_TIMER, COIL_PWM_CHANNEL, pulse);
 }
 
-float GetCoilCurrentMeasured(void) {
-    // Return average coil current measured
-    float sum = 0;
-    for (uint8_t i = 0; i < 4; i++) {
-        sum += coil_current_measured[i];
-    }
-    return sum / 4.0f;
+void CoilControl_Enable(void) {
+    HAL_TIM_PWM_Start(&COIL_PWM_TIMER, COIL_PWM_CHANNEL);
+    HAL_DAC_Start(&hdac, COIL_DAC_CHANNEL);
+    coil_active = true;
 }
 
-float GetCoilVoltageMeasured(void) {
-    // Stub: Return fixed voltage
-    return 12.0f;
+void CoilControl_Disable(void) {
+    HAL_TIM_PWM_Stop(&COIL_PWM_TIMER, COIL_PWM_CHANNEL);
+    HAL_DAC_Stop(&hdac, COIL_DAC_CHANNEL);
+    coil_active = false;
 }
 
-void CoilControl_SetCoilCurrent(uint8_t coilIndex, float current_mA) {
-    if (coilIndex < 4) {
-        coil_current_setpoints[coilIndex] = current_mA;
-    }
-}
-
-// Private helpers
-
-static void SetPWM(uint8_t coilIndex, uint16_t duty) {
-    if (duty > PWM_MAX_DUTY_CYCLE) duty = PWM_MAX_DUTY_CYCLE;
-
-    switch (coilIndex) {
-        case 0:
-            __HAL_TIM_SET_COMPARE(&COIL_PWM_TIMER, COIL_PWM_CHANNEL_1, duty);
-            break;
-        case 1:
-            __HAL_TIM_SET_COMPARE(&COIL_PWM_TIMER, COIL_PWM_CHANNEL_2, duty);
-            break;
-        case 2:
-            __HAL_TIM_SET_COMPARE(&COIL_PWM_TIMER, COIL_PWM_CHANNEL_3, duty);
-            break;
-        case 3:
-            __HAL_TIM_SET_COMPARE(&COIL_PWM_TIMER, COIL_PWM_CHANNEL_4, duty);
-            break;
-        default:
-            break;
-    }
-}
-
-static uint16_t CurrentToPWMDuty(float current_mA) {
-    // Simple linear map for demo: 0mA -> 0 duty, MAX_COIL_CURRENT_mA -> 100% duty
-    if (current_mA < 0) current_mA = 0;
-    if (current_mA > MAX_COIL_CURRENT_mA) current_mA = MAX_COIL_CURRENT_mA;
-
-    return (uint16_t)((current_mA / MAX_COIL_CURRENT_mA) * PWM_MAX_DUTY_CYCLE);
+bool CoilControl_IsActive(void) {
+    return coil_active;
 }

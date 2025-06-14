@@ -1,110 +1,75 @@
 /*
- * main.cpp - TMF Flight Controller Main Firmware Entry
+ * main.cpp - Entry point for TMF drone firmware
  * MCU: STM32F746ZG
- * Author: BryceWDesign (Inspired by Darkstar principles)
- * License: APACHE 2.0
+ * Author: BryceWDesign
+ * License: Apache-2.0
  *
- * This file initializes the hardware, RTOS, and starts main control loops.
- * It integrates sensor reading, coil control, flight stabilization, and telemetry.
+ * Initializes all subsystems and runs the real-time flight control loop.
+ * This version assumes test mode inputs are simulated.
  */
 
-#include "stm32f7xx_hal.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "sensors.h"
-#include "coil_control.h"
 #include "flight_control.h"
-#include "telemetry.h"
-#include "power_management.h"
-#include "safety.h"
+#include "power_monitor.h"
+#include "propulsion_driver.h"
+#include "sensors.h"
+#include <cstdio>
+#include <cmath>
+#include <chrono>
+#include <thread>
 
-// Forward declarations
-void SystemClock_Config(void);
-void Hardware_Init(void);
-void StartScheduler(void);
+#define LOOP_INTERVAL_MS 10
 
-int main(void)
-{
-    // 1. MCU HAL Init & Clock Setup
-    HAL_Init();
-    SystemClock_Config();
+int main() {
+    printf("Initializing TMF Drone Firmware...\n");
 
-    // 2. Hardware Peripherals Init
-    Hardware_Init();
-
-    // 3. Initialize subsystems
-    Sensors_Init();         // IMU, Baro, Temp Sensors
-    CoilControl_Init();     // Coil DACs, PWM Timers
-    FlightControl_Init();   // PID controllers, state estimators
-    Telemetry_Init();       // Radio link, UART, BLE
-    PowerManagement_Init(); // ADC for volt/current sensing
-    Safety_Init();          // Watchdog, fault handlers
-
-    // 4. Create FreeRTOS tasks for core loops
-    xTaskCreate(SensorTask, "Sensors", 512, NULL, 5, NULL);
-    xTaskCreate(CoilControlTask, "Coils", 512, NULL, 6, NULL);
-    xTaskCreate(FlightControlTask, "FlightCtrl", 768, NULL, 7, NULL);
-    xTaskCreate(TelemetryTask, "Telemetry", 512, NULL, 4, NULL);
-    xTaskCreate(PowerMonitorTask, "PowerMon", 512, NULL, 5, NULL);
-    xTaskCreate(SafetyTask, "Safety", 512, NULL, 8, NULL);
-
-    // 5. Start RTOS scheduler
-    StartScheduler();
-
-    // 6. Should never reach here
-    while(1)
-    {
-        // Trap: critical failure in scheduler start
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0); // LED blink error
-        HAL_Delay(500);
+    if (!PowerMonitor_Init()) {
+        printf("Power monitor initialization failed.\n");
+        return -1;
     }
-}
 
-void SystemClock_Config(void)
-{
-    // Configures HSE 8MHz crystal, PLL for 216MHz CPU clock
-    // Enables caches and sets up voltage scaling
-    // Detailed register config omitted for brevity
-}
+    if (!Sensors_Init()) {
+        printf("Sensor initialization failed.\n");
+        return -1;
+    }
 
-void Hardware_Init(void)
-{
-    // Init GPIOs for SPI, I2C, UART, DAC, PWM, LEDs
-    // Init SPI Flash interface
-    // Init ADC channels for power sensors
-    // Init timers for PWM and timebase
-    // Init watchdog timer
-}
+    if (!FlightControl_Init()) {
+        printf("Flight control initialization failed.\n");
+        return -1;
+    }
 
-// RTOS hook implementations for error and stack overflow handling
-extern "C" void vApplicationMallocFailedHook(void)
-{
-    // Handle out-of-memory errors
-    taskDISABLE_INTERRUPTS();
-    while(1);
-}
+    if (!PropulsionDriver_Init()) {
+        printf("Propulsion driver initialization failed.\n");
+        return -1;
+    }
 
-extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
-{
-    // Handle stack overflows
-    (void)pcTaskName;
-    (void)xTask;
-    taskDISABLE_INTERRUPTS();
-    while(1);
-}
+    printf("Initialization complete. Entering control loop...\n");
 
-extern "C" void vApplicationIdleHook(void)
-{
-    // Idle hook can be used for low power or logging
-}
+    // Dummy command: can later be replaced by RC input, AI pilot, or BCI interface
+    Flight_Command_t command = {
+        .roll = 0.0f,
+        .pitch = 0.0f,
+        .yaw = 0.0f,
+        .throttle = 0.6f
+    };
 
-extern "C" void vApplicationTickHook(void)
-{
-    // Optional tick hook, e.g. for software timers
-}
+    while (true) {
+        float current_roll = 0.0f;
+        float current_pitch = 0.0f;
+        float current_yaw = 0.0f;
 
-static void StartScheduler(void)
-{
-    vTaskStartScheduler();
-}
+        if (!Sensors_ReadIMU(&current_roll, &current_pitch, &current_yaw)) {
+            printf("Sensor read error. Skipping frame.\n");
+            continue;
+        }
 
+        Motor_Output_t motors;
+        FlightControl_Update(&command, current_roll, current_pitch, current_yaw, &motors);
+        PropulsionDriver_SetOutputs(&motors);
+
+        PowerMonitor_CheckHealth(); // Optional: alert/log on issues
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(LOOP_INTERVAL_MS));
+    }
+
+    return 0;
+}

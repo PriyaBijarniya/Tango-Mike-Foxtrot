@@ -1,34 +1,36 @@
 /*
- * coil_control.h - Public API for plasma coil driver
+ * coil_control.h - Plasma coil thruster control interface for TMF drone
  * MCU: STM32F746ZG
  * Author: BryceWDesign
  * License: Apache-2.0
  *
- * Provides functions to initialize, control, and monitor
- * plasma coils used for Darkstar plasma shell propulsion.
+ * Provides functions to initialize and control high-frequency plasma coils
+ * used for propulsion and plasma shell generation in the TMF drone.
  */
 
 #ifndef COIL_CONTROL_H
 #define COIL_CONTROL_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
-// Initialize plasma coil control peripherals (DAC, PWM timers)
+// Initialize plasma coil hardware (GPIO, timers, DACs, etc.)
 void CoilControl_Init(void);
 
-// Coil control main task, runs periodic control loop (should be started as RTOS task)
-void CoilControlTask(void *parameters);
+// Set coil drive frequency in Hz (typical range: 10kHz - 1MHz)
+// Returns true if frequency successfully set, false otherwise
+bool CoilControl_SetFrequency(uint32_t frequency_hz);
 
-// Set coil current setpoint in milliamps (0 to max safe current)
-void SetCoilCurrentSetpoint(float milliamps);
+// Set coil drive amplitude (0.0 to 1.0 normalized power output)
+void CoilControl_SetAmplitude(float amplitude);
 
-// Get latest measured coil current in milliamps
-float GetCoilCurrentMeasured(void);
+// Enable plasma coil drive signal output
+void CoilControl_Enable(void);
 
-// Get latest measured coil voltage in volts
-float GetCoilVoltageMeasured(void);
+// Disable plasma coil drive signal output
+void CoilControl_Disable(void);
 
-// Set current setpoint for individual coils (index 0 to 3)
-void CoilControl_SetCoilCurrent(uint8_t coilIndex, float current_mA);
+// Read back coil operational status (true if running, false if stopped)
+bool CoilControl_IsActive(void);
 
 #endif // COIL_CONTROL_H

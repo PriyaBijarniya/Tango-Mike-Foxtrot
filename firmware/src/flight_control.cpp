@@ -1,121 +1,113 @@
 /*
- * flight_control.cpp - Flight control stabilization and motor mixing for TMF drone
+ * flight_control.cpp - Flight stabilization and motor mixing for TMF drone
  * MCU: STM32F746ZG
  * Author: BryceWDesign
  * License: Apache-2.0
  *
- * Implements PID control loops for roll, pitch, yaw stabilization,
- * motor output mixing, and emergency shutdown.
+ * Implements PID control loops for roll, pitch, yaw stabilization
+ * and computes motor outputs accordingly.
  */
 
 #include "flight_control.h"
-#include <string.h>
 #include <math.h>
+#include <string.h>
 
-// PID controllers for roll, pitch, yaw
 static PID_Controller_t pid_roll;
 static PID_Controller_t pid_pitch;
 static PID_Controller_t pid_yaw;
 
-// Current attitude setpoint
-static AttitudeSetpoint_t attitude_setpoint;
-
-// Latest motor outputs
-static uint16_t motor_outputs[MOTOR_COUNT];
-
-// Helper PID function prototypes
+static void PID_Init(PID_Controller_t *pid, float kp, float ki, float kd, float out_min, float out_max);
 static float PID_Update(PID_Controller_t *pid, float setpoint, float measured, float dt);
-static void MotorMix(float roll_output, float pitch_output, float yaw_output, uint16_t *motors);
+
+// Constants: tune these for your drone
+#define PID_ROLL_KP  6.0f
+#define PID_ROLL_KI  0.3f
+#define PID_ROLL_KD  0.05f
+
+#define PID_PITCH_KP  6.0f
+#define PID_PITCH_KI  0.3f
+#define PID_PITCH_KD  0.05f
+
+#define PID_YAW_KP  4.0f
+#define PID_YAW_KI  0.2f
+#define PID_YAW_KD  0.02f
+
+#define MOTOR_OUTPUT_MIN  0.0f
+#define MOTOR_OUTPUT_MAX  1.0f
 
 bool FlightControl_Init(void) {
-    // Initialize PID controllers with tuned constants (example values)
-    pid_roll.kp = 6.0f; pid_roll.ki = 0.05f; pid_roll.kd = 0.3f;
-    pid_pitch.kp = 6.0f; pid_pitch.ki = 0.05f; pid_pitch.kd = 0.3f;
-    pid_yaw.kp = 4.0f; pid_yaw.ki = 0.02f; pid_yaw.kd = 0.15f;
-
-    pid_roll.integrator = 0.0f; pid_pitch.integrator = 0.0f; pid_yaw.integrator = 0.0f;
-    pid_roll.prev_error = 0.0f; pid_pitch.prev_error = 0.0f; pid_yaw.prev_error = 0.0f;
-
-    pid_roll.output_min = -400.0f; pid_roll.output_max = 400.0f;
-    pid_pitch.output_min = -400.0f; pid_pitch.output_max = 400.0f;
-    pid_yaw.output_min = -400.0f; pid_yaw.output_max = 400.0f;
-
-    memset(motor_outputs, MOTOR_PWM_MIN, sizeof(motor_outputs));
-
-    attitude_setpoint.roll = 0.0f;
-    attitude_setpoint.pitch = 0.0f;
-    attitude_setpoint.yaw = 0.0f;
-
+    PID_Init(&pid_roll, PID_ROLL_KP, PID_ROLL_KI, PID_ROLL_KD, MOTOR_OUTPUT_MIN, MOTOR_OUTPUT_MAX);
+    PID_Init(&pid_pitch, PID_PITCH_KP, PID_PITCH_KI, PID_PITCH_KD, MOTOR_OUTPUT_MIN, MOTOR_OUTPUT_MAX);
+    PID_Init(&pid_yaw, PID_YAW_KP, PID_YAW_KI, PID_YAW_KD, MOTOR_OUTPUT_MIN, MOTOR_OUTPUT_MAX);
     return true;
 }
 
-void FlightControl_SetAttitudeSetpoint(AttitudeSetpoint_t setpoint) {
-    attitude_setpoint = setpoint;
+void FlightControl_Reset(void) {
+    memset(&pid_roll, 0, sizeof(pid_roll));
+    memset(&pid_pitch, 0, sizeof(pid_pitch));
+    memset(&pid_yaw, 0, sizeof(pid_yaw));
 }
 
-void FlightControl_Update(IMU_State_t *imu_state) {
-    // Assuming fixed dt for simplicity (e.g. 0.01s update rate)
-    float dt = 0.01f;
+void FlightControl_Update(const Flight_Command_t *cmd, 
+                          float current_roll, float current_pitch, float current_yaw,
+                          Motor_Output_t *motors) {
+    // Assume dt is fixed timestep; adjust for actual control loop timing in real code
+    const float dt = 0.01f; // 10ms typical control loop
 
-    // Calculate PID outputs for each axis
-    float roll_output = PID_Update(&pid_roll, attitude_setpoint.roll, imu_state->roll, dt);
-    float pitch_output = PID_Update(&pid_pitch, attitude_setpoint.pitch, imu_state->pitch, dt);
-    float yaw_output = PID_Update(&pid_yaw, attitude_setpoint.yaw, imu_state->yaw, dt);
+    float roll_output = PID_Update(&pid_roll, cmd->roll, current_roll, dt);
+    float pitch_output = PID_Update(&pid_pitch, cmd->pitch, current_pitch, dt);
+    float yaw_output = PID_Update(&pid_yaw, cmd->yaw, current_yaw, dt);
 
-    // Mix PID outputs to motor signals
-    MotorMix(roll_output, pitch_output, yaw_output, motor_outputs);
+    // Mix motor outputs for quadcopter (X configuration)
+    // Motor layout:
+    // motor1: front-left (CCW)
+    // motor2: front-right (CW)
+    // motor3: rear-right (CCW)
+    // motor4: rear-left (CW)
+    //
+    // Adjust motor speeds by adding/subtracting roll, pitch, yaw PID outputs
+    motors->motor1 = cmd->throttle + pitch_output + roll_output - yaw_output;
+    motors->motor2 = cmd->throttle + pitch_output - roll_output + yaw_output;
+    motors->motor3 = cmd->throttle - pitch_output - roll_output - yaw_output;
+    motors->motor4 = cmd->throttle - pitch_output + roll_output + yaw_output;
+
+    // Clamp motor outputs to allowed range
+    motors->motor1 = fminf(fmaxf(motors->motor1, MOTOR_OUTPUT_MIN), MOTOR_OUTPUT_MAX);
+    motors->motor2 = fminf(fmaxf(motors->motor2, MOTOR_OUTPUT_MIN), MOTOR_OUTPUT_MAX);
+    motors->motor3 = fminf(fmaxf(motors->motor3, MOTOR_OUTPUT_MIN), MOTOR_OUTPUT_MAX);
+    motors->motor4 = fminf(fmaxf(motors->motor4, MOTOR_OUTPUT_MIN), MOTOR_OUTPUT_MAX);
 }
 
-void FlightControl_GetMotorOutputs(uint16_t motor_out[MOTOR_COUNT]) {
-    memcpy(motor_out, motor_outputs, sizeof(motor_outputs));
+/* --- Internal PID functions --- */
+
+static void PID_Init(PID_Controller_t *pid, float kp, float ki, float kd, float out_min, float out_max) {
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+    pid->integral = 0.0f;
+    pid->last_error = 0.0f;
+    pid->output_min = out_min;
+    pid->output_max = out_max;
+    pid->output = 0.0f;
 }
 
-void FlightControl_MotorStop(void) {
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        motor_outputs[i] = MOTOR_PWM_MIN;
-    }
-}
-
-// --- PID helper function ---
 static float PID_Update(PID_Controller_t *pid, float setpoint, float measured, float dt) {
     float error = setpoint - measured;
-    pid->integrator += error * dt;
+    pid->integral += error * dt;
 
-    // Anti-windup
-    if (pid->integrator > pid->output_max) pid->integrator = pid->output_max;
-    else if (pid->integrator < pid->output_min) pid->integrator = pid->output_min;
+    // Prevent integral windup by clamping
+    if (pid->integral > pid->output_max) pid->integral = pid->output_max;
+    else if (pid->integral < pid->output_min) pid->integral = pid->output_min;
 
-    float derivative = (error - pid->prev_error) / dt;
-    pid->prev_error = error;
+    float derivative = (error - pid->last_error) / dt;
+    pid->last_error = error;
 
-    float output = pid->kp * error + pid->ki * pid->integrator + pid->kd * derivative;
+    float output = pid->kp * error + pid->ki * pid->integral + pid->kd * derivative;
 
+    // Clamp output to limits
     if (output > pid->output_max) output = pid->output_max;
     else if (output < pid->output_min) output = pid->output_min;
 
+    pid->output = output;
     return output;
-}
-
-// --- Motor mixing for quad X-configuration ---
-// Motors order: 0=front-left, 1=front-right, 2=rear-right, 3=rear-left
-static void MotorMix(float roll_output, float pitch_output, float yaw_output, uint16_t *motors) {
-    // Base throttle at midpoint (1500), PID outputs add/subtract to each motor
-    float base_throttle = 1500.0f;
-
-    // Mixing matrix (typical quad X)
-    // Motor 0: +roll, +pitch, -yaw
-    // Motor 1: -roll, +pitch, +yaw
-    // Motor 2: -roll, -pitch, -yaw
-    // Motor 3: +roll, -pitch, +yaw
-
-    float m0 = base_throttle + roll_output + pitch_output - yaw_output;
-    float m1 = base_throttle - roll_output + pitch_output + yaw_output;
-    float m2 = base_throttle - roll_output - pitch_output - yaw_output;
-    float m3 = base_throttle + roll_output - pitch_output + yaw_output;
-
-    // Clamp outputs
-    motors[0] = (uint16_t)(m0 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m0 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m0));
-    motors[1] = (uint16_t)(m1 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m1 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m1));
-    motors[2] = (uint16_t)(m2 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m2 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m2));
-    motors[3] = (uint16_t)(m3 < MOTOR_PWM_MIN ? MOTOR_PWM_MIN : (m3 > MOTOR_PWM_MAX ? MOTOR_PWM_MAX : m3));
 }
